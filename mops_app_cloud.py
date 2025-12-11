@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import time
 import urllib3
 
-# 1. 忽略 SSL 警告
+# 1. 忽略 SSL 警告 (這是解決紅色錯誤的關鍵)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 設定頁面與 CSS (Apple 風格) ---
@@ -94,12 +94,16 @@ apple_css = """
 """
 st.markdown(apple_css, unsafe_allow_html=True)
 
-# --- 爬蟲邏輯 (已修正) ---
-def get_mops_data(co_id, days_back):
+# --- 爬蟲邏輯 ---
+def get_mops_data(co_id, days_back, debug=False):
     url = "https://mops.twse.com.tw/mops/web/ajax_t05st01"
+    
+    # 偽裝成一般瀏覽器，降低被擋機率
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://mops.twse.com.tw/mops/web/t05st01'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://mops.twse.com.tw/mops/web/t05st01',
+        'Origin': 'https://mops.twse.com.tw',
+        'Content-Type': 'application/x-www-form-urlencoded'
     }
 
     end_date = datetime.now()
@@ -108,26 +112,21 @@ def get_mops_data(co_id, days_back):
     current_roc_year = end_date.year - 1911
     current_month = end_date.month
     
-    # 計算需要查詢的月份
     months_to_query = [(current_roc_year, current_month)]
     if start_date.month != end_date.month:
-        # 如果跨月，也要抓上個月
         prev_month_date = end_date.replace(day=1) - timedelta(days=1)
         months_to_query.append((prev_month_date.year - 1911, prev_month_date.month))
     
     all_data = []
 
-    # 針對每個月份進行查詢
     for year, month in months_to_query:
-        # 重要修正：MOPS 需要指定市場別 (sii=上市, otc=上櫃)
-        # 我們不知道使用者輸入的是上市還是上櫃，所以兩個都試試看
+        # 雙重掃描：不知道該股票是上市(sii)還是上櫃(otc)，所以兩個都查
         market_types = ['sii', 'otc'] 
-        
-        found_in_month = False # 標記這個月是否已經找到資料，避免重複
+        found_in_month = False 
 
         for mk_type in market_types:
             if found_in_month: 
-                break # 如果已經在上市找到資料，就不需找上櫃，反之亦然 (通常一家公司只會屬於一種)
+                break 
 
             payload = {
                 'encodeURIComponent': '1',
@@ -136,7 +135,7 @@ def get_mops_data(co_id, days_back):
                 'off': '1',
                 'keyword4': '',
                 'code1': '',
-                'TYPEK': mk_type, # 這裡動態切換 sii / otc
+                'TYPEK': mk_type, 
                 'checkbtn': '',
                 'queryName': 'co_id',
                 'inpuType': 'co_id',
@@ -148,34 +147,40 @@ def get_mops_data(co_id, days_back):
             }
             
             try:
-                # verify=False 避免 SSL 錯誤
-                r = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
+                # verify=False 解決 SSL 問題
+                r = requests.post(url, data=payload, headers=headers, timeout=15, verify=False)
                 r.encoding = 'utf8'
-                soup = BeautifulSoup(r.text, 'html.parser')
                 
-                tables = soup.find_all('table')
+                # --- 除錯模式：顯示伺服器回應狀況 ---
+                if debug:
+                    st.text(f"[{co_id}] {year}/{month} ({mk_type}) -> Status: {r.status_code}")
+                    if len(r.text) < 500:
+                        st.caption(f"回傳內容過短 (可能被擋): {r.text[:200]}")
+                
+                soup = BeautifulSoup(r.text, 'html.parser')
+                tables = soup.find_all('table') # 抓所有表格，不設限 class
                 
                 for table in tables:
-                    # 判斷是否為正確的表格 (通常含有 'hasBorder' class 且內容夠多)
-                    if 'hasBorder' in str(table.attrs.get('class', [])):
-                        rows = table.find_all('tr')
-                        for row in rows:
-                            cols = row.find_all('td')
-                            # MOPS 表格結構: [0]代號 [1]名稱 [2]日期 [3]時間 [4]主旨
-                            if len(cols) > 4:
-                                date_str = cols[2].text.strip()
-                                title = cols[4].text.strip()
-                                name = cols[1].text.strip()
-                                
-                                # 簡單檢核：如果名稱欄位是空的，可能不是資料列
-                                if not name:
-                                    continue
+                    rows = table.find_all('tr')
+                    for row in rows:
+                        cols = row.find_all('td')
+                        # MOPS 標準格式：[0]代號 [1]名稱 [2]日期 [3]時間 [4]主旨
+                        if len(cols) > 4:
+                            date_str = cols[2].text.strip()
+                            title = cols[4].text.strip()
+                            name = cols[1].text.strip()
+                            
+                            # 簡單過濾垃圾資料
+                            if not name or "主旨" in title:
+                                continue
 
-                                try:
-                                    y, m, d = map(int, date_str.split('/'))
+                            try:
+                                # 處理日期格式 112/01/01
+                                parts = date_str.split('/')
+                                if len(parts) == 3:
+                                    y, m, d = map(int, parts)
                                     msg_date = datetime(y + 1911, m, d)
                                     
-                                    # 日期過濾
                                     if start_date <= msg_date <= end_date:
                                         all_data.append({
                                             "Stock": co_id,
@@ -184,13 +189,14 @@ def get_mops_data(co_id, days_back):
                                             "Title": title,
                                             "RawDate": msg_date 
                                         })
-                                        found_in_month = True # 標記找到資料了
-                                except ValueError:
-                                    continue 
+                                        found_in_month = True 
+                            except ValueError:
+                                continue 
                 
-                time.sleep(0.2) # 避免對伺服器請求太快
+                time.sleep(0.5) # 稍微休息，避免被認為是攻擊
             except Exception as e:
-                # 這裡不顯示錯誤，因為嘗試錯誤市場別(例如用 otc 查上市)本來就會失敗或沒資料
+                if debug:
+                    st.error(f"連線錯誤: {e}")
                 pass
             
     return all_data
@@ -202,6 +208,10 @@ st.markdown("連線至公開資訊觀測站 (MOPS)，即時追蹤上市櫃公司
 
 with st.sidebar:
     st.header("設定 Settings")
+    
+    st.info("💡 如果完全抓不到資料，請嘗試開啟下方除錯模式，檢查是否被 MOPS 封鎖 IP。")
+    debug_mode = st.checkbox("開啟除錯模式 (Debug Mode)", value=False)
+    
     st.subheader("搜尋範圍")
     days_lookback = st.number_input("往前抓取天數", min_value=1, max_value=90, value=7, step=1)
     
@@ -223,19 +233,22 @@ st.write(f"日期範圍: 過去 {days_lookback} 天")
 
 if st.button("開始搜尋", key="search_btn"):
     
-    with st.spinner('正在連線至公開資訊觀測站抓取資料 (雙重市場掃描)...'):
+    with st.spinner('正在連線至公開資訊觀測站抓取資料...'):
         all_results = []
         progress_bar = st.progress(0)
         
         for i, stock_id in enumerate(target_stocks):
-            data = get_mops_data(stock_id, days_lookback)
+            # 傳入除錯模式參數
+            data = get_mops_data(stock_id, days_lookback, debug=debug_mode)
             all_results.extend(data)
             progress_bar.progress((i + 1) / len(target_stocks))
             
         progress_bar.empty()
 
     if not all_results:
-        st.info("在此日期範圍內查無重大訊息。")
+        st.warning("在此日期範圍內查無重大訊息。")
+        if not debug_mode:
+            st.markdown("🔍 **沒看到資料？** 請嘗試在左側開啟「除錯模式」查看連線狀況。")
     else:
         # 排序：最新的日期在最上面
         all_results.sort(key=lambda x: x['RawDate'], reverse=True)
@@ -257,7 +270,6 @@ if st.button("開始搜尋", key="search_btn"):
             """, unsafe_allow_html=True)
         
         with st.expander("查看詳細數據表格"):
-            # 建立 DataFrame 並移除重複項 (以防萬一)
             df = pd.DataFrame(all_results)
             if not df.empty:
                 df = df.drop_duplicates(subset=['Stock', 'Date', 'Title'])
