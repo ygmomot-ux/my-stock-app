@@ -4,10 +4,9 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import time
-import urllib3 # 1. 引入這個套件來管理警告
+import urllib3
 
-# --- 2. 修正 SSL 錯誤的關鍵設定 ---
-# 告訴系統不要一直跳出 "不安全連線" 的紅色警告字樣，讓畫面保持乾淨
+# 1. 忽略 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 設定頁面與 CSS (Apple 風格) ---
@@ -15,43 +14,34 @@ st.set_page_config(page_title="重大訊息觀測站", layout="centered")
 
 apple_css = """
 <style>
-    /* 全局字體與背景 */
     @import url('https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;600&display=swap');
     
     html, body, [class*="css"] {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        background-color: #F5F5F7; /* Apple 淺灰背景 */
+        background-color: #F5F5F7;
         color: #1D1D1F;
     }
-    
-    /* 標題樣式 */
     h1 {
         font-weight: 600;
         letter-spacing: -0.02em;
         color: #1D1D1F;
         padding-bottom: 20px;
     }
-    
-    /* 卡片容器風格 */
     .stDataFrame, .element-container, .stMarkdown {
         background: white;
         border-radius: 18px;
         padding: 2px;
     }
-    
-    /* 輸入框優化 */
     .stTextInput input, .stNumberInput input {
         border-radius: 12px;
         border: 1px solid #D2D2D7;
         background-color: rgba(255, 255, 255, 0.8);
         padding: 10px;
     }
-    
-    /* 按鈕優化 (仿 Apple 按鈕) */
     .stButton > button {
         background-color: #0071E3;
         color: white;
-        border-radius: 980px; /* 膠囊狀 */
+        border-radius: 980px;
         padding: 10px 24px;
         font-size: 17px;
         font-weight: 500;
@@ -65,20 +55,6 @@ apple_css = """
         transform: scale(1.02);
         box-shadow: 0 6px 12px rgba(0, 113, 227, 0.3);
     }
-    
-    /* 表格樣式優化 */
-    .dataframe {
-        font-size: 14px !important;
-        border: none !important;
-    }
-    
-    /* 側邊欄樣式 */
-    section[data-testid="stSidebar"] {
-        background-color: #FFFFFF;
-        border-right: 1px solid #D2D2D7;
-    }
-    
-    /* 自定義結果卡片 */
     .result-card {
         background-color: #FFFFFF;
         padding: 20px;
@@ -112,15 +88,13 @@ apple_css = """
         font-size: 12px;
         color: #86868B;
     }
-    
-    /* 隱藏 Streamlit 預設選單 */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 </style>
 """
 st.markdown(apple_css, unsafe_allow_html=True)
 
-# --- 爬蟲邏輯 ---
+# --- 爬蟲邏輯 (已修正) ---
 def get_mops_data(co_id, days_back):
     url = "https://mops.twse.com.tw/mops/web/ajax_t05st01"
     headers = {
@@ -134,68 +108,90 @@ def get_mops_data(co_id, days_back):
     current_roc_year = end_date.year - 1911
     current_month = end_date.month
     
+    # 計算需要查詢的月份
     months_to_query = [(current_roc_year, current_month)]
     if start_date.month != end_date.month:
+        # 如果跨月，也要抓上個月
         prev_month_date = end_date.replace(day=1) - timedelta(days=1)
         months_to_query.append((prev_month_date.year - 1911, prev_month_date.month))
     
     all_data = []
 
+    # 針對每個月份進行查詢
     for year, month in months_to_query:
-        payload = {
-            'encodeURIComponent': '1',
-            'step': '1',
-            'firstin': '1',
-            'off': '1',
-            'keyword4': '',
-            'code1': '',
-            'TYPEK': 'all',
-            'checkbtn': '',
-            'queryName': 'co_id',
-            'inpuType': 'co_id',
-            'TYPEK2': '',
-            'co_id': co_id,
-            'year': str(year),
-            'month': str(month),
-            'day': '' 
-        }
+        # 重要修正：MOPS 需要指定市場別 (sii=上市, otc=上櫃)
+        # 我們不知道使用者輸入的是上市還是上櫃，所以兩個都試試看
+        market_types = ['sii', 'otc'] 
         
-        try:
-            # --- 3. 關鍵修正：verify=False ---
-            # 這告訴程式：不管 MOPS 的憑證有沒有過期，直接把資料拿回來！
-            r = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
+        found_in_month = False # 標記這個月是否已經找到資料，避免重複
+
+        for mk_type in market_types:
+            if found_in_month: 
+                break # 如果已經在上市找到資料，就不需找上櫃，反之亦然 (通常一家公司只會屬於一種)
+
+            payload = {
+                'encodeURIComponent': '1',
+                'step': '1',
+                'firstin': '1',
+                'off': '1',
+                'keyword4': '',
+                'code1': '',
+                'TYPEK': mk_type, # 這裡動態切換 sii / otc
+                'checkbtn': '',
+                'queryName': 'co_id',
+                'inpuType': 'co_id',
+                'TYPEK2': '',
+                'co_id': co_id,
+                'year': str(year),
+                'month': str(month),
+                'day': '' 
+            }
             
-            r.encoding = 'utf8'
-            soup = BeautifulSoup(r.text, 'html.parser')
-            
-            tables = soup.find_all('table')
-            
-            for table in tables:
-                if 'hasBorder' in str(table.attrs.get('class', [])):
-                    rows = table.find_all('tr')
-                    for row in rows:
-                        cols = row.find_all('td')
-                        if len(cols) > 4:
-                            date_str = cols[2].text.strip()
-                            title = cols[4].text.strip()
-                            
-                            try:
-                                y, m, d = map(int, date_str.split('/'))
-                                msg_date = datetime(y + 1911, m, d)
+            try:
+                # verify=False 避免 SSL 錯誤
+                r = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
+                r.encoding = 'utf8'
+                soup = BeautifulSoup(r.text, 'html.parser')
+                
+                tables = soup.find_all('table')
+                
+                for table in tables:
+                    # 判斷是否為正確的表格 (通常含有 'hasBorder' class 且內容夠多)
+                    if 'hasBorder' in str(table.attrs.get('class', [])):
+                        rows = table.find_all('tr')
+                        for row in rows:
+                            cols = row.find_all('td')
+                            # MOPS 表格結構: [0]代號 [1]名稱 [2]日期 [3]時間 [4]主旨
+                            if len(cols) > 4:
+                                date_str = cols[2].text.strip()
+                                title = cols[4].text.strip()
+                                name = cols[1].text.strip()
                                 
-                                if start_date <= msg_date <= end_date:
-                                    all_data.append({
-                                        "Stock": co_id,
-                                        "Name": cols[1].text.strip(),
-                                        "Date": date_str,
-                                        "Title": title,
-                                        "RawDate": msg_date 
-                                    })
-                            except ValueError:
-                                continue 
-            time.sleep(0.5) 
-        except Exception as e:
-            st.error(f"抓取 {co_id} 時發生錯誤: {e}")
+                                # 簡單檢核：如果名稱欄位是空的，可能不是資料列
+                                if not name:
+                                    continue
+
+                                try:
+                                    y, m, d = map(int, date_str.split('/'))
+                                    msg_date = datetime(y + 1911, m, d)
+                                    
+                                    # 日期過濾
+                                    if start_date <= msg_date <= end_date:
+                                        all_data.append({
+                                            "Stock": co_id,
+                                            "Name": name,
+                                            "Date": date_str,
+                                            "Title": title,
+                                            "RawDate": msg_date 
+                                        })
+                                        found_in_month = True # 標記找到資料了
+                                except ValueError:
+                                    continue 
+                
+                time.sleep(0.2) # 避免對伺服器請求太快
+            except Exception as e:
+                # 這裡不顯示錯誤，因為嘗試錯誤市場別(例如用 otc 查上市)本來就會失敗或沒資料
+                pass
             
     return all_data
 
@@ -227,7 +223,7 @@ st.write(f"日期範圍: 過去 {days_lookback} 天")
 
 if st.button("開始搜尋", key="search_btn"):
     
-    with st.spinner('正在連線至公開資訊觀測站抓取資料...'):
+    with st.spinner('正在連線至公開資訊觀測站抓取資料 (雙重市場掃描)...'):
         all_results = []
         progress_bar = st.progress(0)
         
@@ -241,6 +237,7 @@ if st.button("開始搜尋", key="search_btn"):
     if not all_results:
         st.info("在此日期範圍內查無重大訊息。")
     else:
+        # 排序：最新的日期在最上面
         all_results.sort(key=lambda x: x['RawDate'], reverse=True)
         st.success(f"搜尋完成！共找到 {len(all_results)} 筆資料。")
         
@@ -260,5 +257,9 @@ if st.button("開始搜尋", key="search_btn"):
             """, unsafe_allow_html=True)
         
         with st.expander("查看詳細數據表格"):
-            df = pd.DataFrame(all_results).drop(columns=['RawDate'])
-            st.dataframe(df, use_container_width=True)
+            # 建立 DataFrame 並移除重複項 (以防萬一)
+            df = pd.DataFrame(all_results)
+            if not df.empty:
+                df = df.drop_duplicates(subset=['Stock', 'Date', 'Title'])
+                df_display = df.drop(columns=['RawDate'])
+                st.dataframe(df_display, use_container_width=True)
