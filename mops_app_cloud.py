@@ -5,6 +5,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import time
 import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # 1. 忽略 SSL 警告 (這是解決紅色錯誤的關鍵)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -94,16 +96,24 @@ apple_css = """
 """
 st.markdown(apple_css, unsafe_allow_html=True)
 
-# --- 爬蟲邏輯 ---
+# --- 爬蟲邏輯 (戰鬥版：Session + Retry) ---
 def get_mops_data(co_id, days_back, debug=False):
     url = "https://mops.twse.com.tw/mops/web/ajax_t05st01"
     
-    # 偽裝成一般瀏覽器，降低被擋機率
+    # 使用 Session 保持連線狀態，模擬真實使用者行為
+    session = requests.Session()
+    
+    # 設定重試機制，防止網路瞬斷
+    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': 'https://mops.twse.com.tw/mops/web/t05st01',
         'Origin': 'https://mops.twse.com.tw',
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': '*/*',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
     }
 
     end_date = datetime.now()
@@ -120,7 +130,7 @@ def get_mops_data(co_id, days_back, debug=False):
     all_data = []
 
     for year, month in months_to_query:
-        # 雙重掃描：不知道該股票是上市(sii)還是上櫃(otc)，所以兩個都查
+        # 雙重掃描：上市(sii) 與 上櫃(otc)
         market_types = ['sii', 'otc'] 
         found_in_month = False 
 
@@ -147,35 +157,32 @@ def get_mops_data(co_id, days_back, debug=False):
             }
             
             try:
-                # verify=False 解決 SSL 問題
-                r = requests.post(url, data=payload, headers=headers, timeout=15, verify=False)
+                # 使用 session.post
+                r = session.post(url, data=payload, headers=headers, timeout=15, verify=False)
                 r.encoding = 'utf8'
                 
-                # --- 除錯模式：顯示伺服器回應狀況 ---
                 if debug:
-                    st.text(f"[{co_id}] {year}/{month} ({mk_type}) -> Status: {r.status_code}")
-                    if len(r.text) < 500:
-                        st.caption(f"回傳內容過短 (可能被擋): {r.text[:200]}")
+                    st.text(f"[{co_id}] {year}/{month} ({mk_type}) -> HTTP {r.status_code}, Length: {len(r.text)}")
+                    # 檢查是否被擋 IP 的特徵
+                    if len(r.text) < 1000 or "Access Denied" in r.text:
+                        st.error(f"⚠️ 警告：MOPS 可能正在封鎖此雲端主機 IP。")
                 
                 soup = BeautifulSoup(r.text, 'html.parser')
-                tables = soup.find_all('table') # 抓所有表格，不設限 class
+                tables = soup.find_all('table')
                 
                 for table in tables:
                     rows = table.find_all('tr')
                     for row in rows:
                         cols = row.find_all('td')
-                        # MOPS 標準格式：[0]代號 [1]名稱 [2]日期 [3]時間 [4]主旨
                         if len(cols) > 4:
                             date_str = cols[2].text.strip()
                             title = cols[4].text.strip()
                             name = cols[1].text.strip()
                             
-                            # 簡單過濾垃圾資料
                             if not name or "主旨" in title:
                                 continue
 
                             try:
-                                # 處理日期格式 112/01/01
                                 parts = date_str.split('/')
                                 if len(parts) == 3:
                                     y, m, d = map(int, parts)
@@ -193,7 +200,7 @@ def get_mops_data(co_id, days_back, debug=False):
                             except ValueError:
                                 continue 
                 
-                time.sleep(0.5) # 稍微休息，避免被認為是攻擊
+                time.sleep(0.5) 
             except Exception as e:
                 if debug:
                     st.error(f"連線錯誤: {e}")
@@ -209,7 +216,8 @@ st.markdown("連線至公開資訊觀測站 (MOPS)，即時追蹤上市櫃公司
 with st.sidebar:
     st.header("設定 Settings")
     
-    st.info("💡 如果完全抓不到資料，請嘗試開啟下方除錯模式，檢查是否被 MOPS 封鎖 IP。")
+    st.warning("⚠️ **重要提示**：\n若搜尋結果為空，極可能是 MOPS 封鎖了雲端主機的 IP。\n\n**最終解決方案**：請下載此程式碼，在您自己的電腦上執行 (Local Run)，保證 100% 成功。")
+    
     debug_mode = st.checkbox("開啟除錯模式 (Debug Mode)", value=False)
     
     st.subheader("搜尋範圍")
@@ -238,7 +246,6 @@ if st.button("開始搜尋", key="search_btn"):
         progress_bar = st.progress(0)
         
         for i, stock_id in enumerate(target_stocks):
-            # 傳入除錯模式參數
             data = get_mops_data(stock_id, days_lookback, debug=debug_mode)
             all_results.extend(data)
             progress_bar.progress((i + 1) / len(target_stocks))
@@ -248,9 +255,8 @@ if st.button("開始搜尋", key="search_btn"):
     if not all_results:
         st.warning("在此日期範圍內查無重大訊息。")
         if not debug_mode:
-            st.markdown("🔍 **沒看到資料？** 請嘗試在左側開啟「除錯模式」查看連線狀況。")
+            st.markdown("🔍 **沒看到資料？** 請嘗試在左側開啟「除錯模式」查看連線狀況。若顯示 `HTTP 200` 但無內容，代表被 MOPS 擋 IP 了。")
     else:
-        # 排序：最新的日期在最上面
         all_results.sort(key=lambda x: x['RawDate'], reverse=True)
         st.success(f"搜尋完成！共找到 {len(all_results)} 筆資料。")
         
