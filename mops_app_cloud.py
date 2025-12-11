@@ -4,6 +4,11 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import time
+import urllib3 # 1. 引入這個套件來管理警告
+
+# --- 2. 修正 SSL 錯誤的關鍵設定 ---
+# 告訴系統不要一直跳出 "不安全連線" 的紅色警告字樣，讓畫面保持乾淨
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 設定頁面與 CSS (Apple 風格) ---
 st.set_page_config(page_title="重大訊息觀測站", layout="centered")
@@ -156,7 +161,10 @@ def get_mops_data(co_id, days_back):
         }
         
         try:
-            r = requests.post(url, data=payload, headers=headers, timeout=10)
+            # --- 3. 關鍵修正：verify=False ---
+            # 這告訴程式：不管 MOPS 的憑證有沒有過期，直接把資料拿回來！
+            r = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
+            
             r.encoding = 'utf8'
             soup = BeautifulSoup(r.text, 'html.parser')
             
