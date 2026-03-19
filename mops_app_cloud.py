@@ -1,48 +1,42 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import requests
-import io
 
-st.title("電信三雄 & momo 重大訊息 (穩定版)")
+st.title("電信三雄 & momo 訊息監控 (國際橋接版)")
 
-# 1. 改用政府開放平台提供的 CSV 資源連結 (通常比較不會檔 IP)
-# 這是上市公司重大訊息的 CSV 接口
-csv_url = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
+# 股票代號清單 (Yahoo Finance 格式需要加 .TW)
+tickers = {
+    "2412.TW": "中華電信",
+    "3045.TW": "台灣大哥大",
+    "4904.TW": "遠傳電信",
+    "8454.TW": "富邦媒 (momo)"
+}
 
-my_stocks = ["2412", "3045", "4904", "8454"]
+st.info("💡 透過 Yahoo Finance 獲取數據，能避開政府網站對雲端 IP 的封鎖。")
 
-if st.button('抓取今日公告'):
-    with st.spinner('嘗試從開放平台通道抓取...'):
+if st.button('獲取最新重大訊息與新聞'):
+    for symbol, name in tickers.items():
+        st.subheader(f"【{symbol} {name}】")
+        
         try:
-            # 2. 我們不抓 JSON 了，改抓原始內容並嘗試解析
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(csv_url, headers=headers, verify=False, timeout=15)
+            # 使用 yfinance 獲取股票物件
+            stock = yf.Ticker(symbol)
             
-            # 3. 檢查抓到的到底是 JSON 還是被擋掉的 HTML
-            content_type = response.headers.get('Content-Type', '')
+            # 抓取新聞 (Yahoo 的新聞包含了官方重大訊息與媒體報導)
+            news = stock.news
             
-            if 'html' in content_type.lower():
-                st.error("❌ 警告：伺服器還是給了網頁而不是數據。")
-                st.info("這代表該 API 目前對雲端 IP 限制極嚴。")
+            if news:
+                for item in news[:10]:  # 只顯示最新的 10 則
+                    # 轉換時間戳記 (Optional)
+                    with st.container():
+                        st.markdown(f"**[{item['publisher']}]** {item['title']}")
+                        st.caption(f"連結: [點此閱讀]({item['link']})")
+                        st.divider()
             else:
-                # 試著讀取 JSON (因為這個 URL 原則上回傳 JSON)
-                df = pd.DataFrame(response.json())
+                st.write("目前暫無最新訊息。")
                 
-                # 過濾代號
-                df['公司代號'] = df['公司代號'].astype(str)
-                result = df[df['公司代號'].isin(my_stocks)]
-                
-                if not result.empty:
-                    st.success(f"成功找到 {len(result)} 則訊息！")
-                    st.dataframe(result[['公司代號', '公司名稱', '發言日期', '主旨']])
-                else:
-                    st.warning("今日名單內的公司尚無公告。")
-                    
         except Exception as e:
-            st.error(f"連線異常：{e}")
-            st.info("這通常是伺服器拒絕了雲端主機的連線。")
+            st.error(f"抓取 {name} 時發生錯誤: {e}")
 
-# 4. 備案：如果還是被擋，提供手動查看連結
 st.markdown("---")
-st.caption("如果自動抓取失效，代表伺服器目前封鎖了 Streamlit IP。")
-st.link_button("前往觀測站手動查看", "https://mops.twse.com.tw/mops/web/t05sr01_1")
+st.caption("註：Yahoo Finance 提供的訊息整合了官方公告與財經新聞，適合日常監控。")
