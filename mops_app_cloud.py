@@ -1,49 +1,48 @@
 import streamlit as st
-import requests
 import pandas as pd
-import urllib3
+import requests
+import io
 
-# 1. 關閉 SSL 警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+st.title("電信三雄 & momo 重大訊息 (穩定版)")
 
-st.title("電信三雄 & momo 重大訊息監控")
+# 1. 改用政府開放平台提供的 CSV 資源連結 (通常比較不會檔 IP)
+# 這是上市公司重大訊息的 CSV 接口
+csv_url = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
 
 my_stocks = ["2412", "3045", "4904", "8454"]
-api_url = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
 
-# 2. 幫程式碼「戴面具」：偽裝成 Chrome 瀏覽器
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-}
-
-if st.button('整理今日重大訊息'):
-    with st.spinner('正在從證交所抓取資料...'):
+if st.button('抓取今日公告'):
+    with st.spinner('嘗試從開放平台通道抓取...'):
         try:
-            # 3. 加上 headers 重新抓取
-            response = requests.get(api_url, headers=headers, verify=False, timeout=10)
+            # 2. 我們不抓 JSON 了，改抓原始內容並嘗試解析
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(csv_url, headers=headers, verify=False, timeout=15)
             
-            # 先檢查是否有內容
-            if not response.text.strip():
-                st.error("伺服器回傳了空的內容，可能是暫時連線不穩。")
-            elif response.status_code == 200:
-                # 嘗試讀取 JSON
-                all_data = pd.DataFrame(response.json())
-                
-                # 過濾資料
-                filtered_data = all_data[all_data['公司代號'].isin(my_stocks)]
-                
-                if not filtered_data.empty:
-                    st.success(f"找到 {len(filtered_data)} 則相關訊息！")
-                    display_cols = ['公司代號', '公司名稱', '發言日期', '發言時間', '主旨']
-                    st.table(filtered_data[display_cols])
-                else:
-                    st.warning("今日這幾家公司目前尚無重大訊息公告。")
+            # 3. 檢查抓到的到底是 JSON 還是被擋掉的 HTML
+            content_type = response.headers.get('Content-Type', '')
+            
+            if 'html' in content_type.lower():
+                st.error("❌ 警告：伺服器還是給了網頁而不是數據。")
+                st.info("這代表該 API 目前對雲端 IP 限制極嚴。")
             else:
-                st.error(f"連線失敗，錯誤代碼：{response.status_code}")
+                # 試著讀取 JSON (因為這個 URL 原則上回傳 JSON)
+                df = pd.DataFrame(response.json())
                 
-        except ValueError: # JSON 解析失敗會跳到這裡
-            st.error("資料解析失敗：伺服器回傳的不是正確的資料格式。")
-            # 顯示前 100 個字元幫助 debug
-            st.code(response.text[:100], language='text')
+                # 過濾代號
+                df['公司代號'] = df['公司代號'].astype(str)
+                result = df[df['公司代號'].isin(my_stocks)]
+                
+                if not result.empty:
+                    st.success(f"成功找到 {len(result)} 則訊息！")
+                    st.dataframe(result[['公司代號', '公司名稱', '發言日期', '主旨']])
+                else:
+                    st.warning("今日名單內的公司尚無公告。")
+                    
         except Exception as e:
-            st.error(f"發生非預期錯誤：{e}")
+            st.error(f"連線異常：{e}")
+            st.info("這通常是伺服器拒絕了雲端主機的連線。")
+
+# 4. 備案：如果還是被擋，提供手動查看連結
+st.markdown("---")
+st.caption("如果自動抓取失效，代表伺服器目前封鎖了 Streamlit IP。")
+st.link_button("前往觀測站手動查看", "https://mops.twse.com.tw/mops/web/t05sr01_1")
